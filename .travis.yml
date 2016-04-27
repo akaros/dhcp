@@ -2,4 +2,4 @@ sudo: required
 dist: trusty
 language: c
 before_install:
-script: cd src; ls
+script: make
