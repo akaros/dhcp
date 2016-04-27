@@ -11,14 +11,15 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <parlib/parlib.h>
 #include <ndblib/ndb.h>
-//#include "ip.h"
 #include <iplib/iplib.h>
+#include <time.h>
 #include "dhcp.h"
 
 void	bootpdump(uint8_t *p, int n);
@@ -36,10 +37,12 @@ int	optgetaddr(Bootp*, int, uint8_t*);
 int	optgetbyte(Bootp*, int);
 uint32_t	optgetulong(Bootp*, int);
 Bootp	*parse(uint8_t*, int);
-void	stdinthread(void*);
-uint32_t	thread(void(*f)(void*), void *a);
-void	timerthread(void*);
+void	*stdinthread(void*);
+uint32_t	thread(void*(*f)(void*), void *a);
+void	*timerthread(void*);
 void	usage(void);
+
+char *argv0;
 
 struct {
 	pthread_mutex_t	lk;
@@ -65,19 +68,22 @@ void
 main(int argc, char *argv[])
 {
 	char *p;
-
+	argv0 = argv[0];
 	/* Make us an SCP with a 2LS */
 	parlib_wants_to_be_mcp = FALSE;
 
-	setnetmtpt(net, sizeof(net), nil);
+	setnetmtpt(net, sizeof(net), NULL);
 
-	ARGBEGIN{
-	case 'x':
-		p = ARGF();
-		if(p == nil)
+	if (argc > 1)
+		switch(*argv[1]) {
+		case 'x':
+			p = &argv[1][1];
+			if(p == NULL)
+				usage();
+			setnetmtpt(net, sizeof(net), p);
+		default: 
 			usage();
-		setnetmtpt(net, sizeof(net), p);
-	}ARGEND;
+		}
 
 #ifdef NOTYET
 	fmtinstall('E', eipfmt);
@@ -90,7 +96,7 @@ main(int argc, char *argv[])
 	thread(stdinthread, 0);
 
 	pthread_mutex_lock(&dhcp.lk);
-	dhcp.starttime = time(0);
+	dhcp.starttime = time(NULL);
 	dhcp.fd = openlisten(net);
 	dhcpsend(Discover);
 	dhcp.state = Sselecting;
@@ -104,18 +110,18 @@ main(int argc, char *argv[])
 	close(dhcp.fd);
 	dhcp.fd = -1;
 
-	print("ip=%I\n", dhcp.client);
-	print("mask=%I\n", dhcp.mask);
-	print("end\n");
+	printf("ip=%I\n", dhcp.client);
+	printf("mask=%I\n", dhcp.mask);
+	printf("end\n");
 
 	/* keep lease alive */
 	for(;;) {
-//fprint(2, "got lease for %d\n", dhcp.lease);
+		fprintf(stderr, "got lease for %d\n", dhcp.lease);
 		pthread_mutex_unlock(&dhcp.lk);
 		sleep(dhcp.lease*500);	/* wait half of lease time */
 		pthread_mutex_lock(&dhcp.lk);
 
-//fprint(2, "try renue\n", dhcp.lease);
+//fprintf(2, "try renue\n", dhcp.lease);
 		dhcp.starttime = time(0);
 		dhcp.fd = openlisten(net);
 		dhcp.xid = time(0)*getpid();
@@ -136,11 +142,11 @@ main(int argc, char *argv[])
 void
 usage(void)
 {
-	fprint(2, "usage: %s [-x netextension]\n", argv0);
-	exits("usage");
+	fprintf(stderr, "usage: %s [-x netextension]\n", argv0);
+	exit(1);
 }
 
-void
+void*
 timerthread(void* v)
 {
 	for(;;) {
@@ -191,9 +197,10 @@ timerthread(void* v)
 		}
 		pthread_mutex_unlock(&dhcp.lk);
 	}
+	return NULL;
 }
 
-void
+void *
 stdinthread(void* v)
 {
 	uint8_t buf[100];
@@ -213,8 +220,9 @@ stdinthread(void* v)
 	}
 	pthread_mutex_unlock(&dhcp.lk);
 
-	postnote(PNGROUP, getpid(), "die");
-	exits(0);
+	//postnote(PNGROUP, getpid(), "die");
+	exit(1);
+	return NULL;
 }
 
 void
@@ -233,7 +241,7 @@ dhcpinit(void)
 		dhcp.xid = time(0)*getpid();
 	srand(dhcp.xid);
 
-	sprint(dhcp.cid, "%s.%d", getenv("sysname"), getpid());
+	snprintf(dhcp.cid, sizeof(dhcp.cid), "%s.%d", getenv("sysname"), getpid());
 }
 
 void
@@ -310,15 +318,15 @@ dhcprecv(void)
 	if(bp == 0)
 		return;
 
-if(1) {
-fprint(2, "recved\n");
-bootpdump(buf, n);
-}
+	if(1) {
+		fprintf(stderr, "recved\n");
+		bootpdump(buf, n);
+	}
 
 	type = optgetbyte(bp, ODtype);
 	switch(type) {
 	default:
-		fprint(2, "dhcprecv: unknown type: %d\n", type);
+		fprintf(stderr, "dhcprecv: unknown type: %d\n", type);
 		break;
 	case Offer:
 		if(dhcp.state != Sselecting)
@@ -330,7 +338,7 @@ bootpdump(buf, n);
 			memset(mask, 0xff, sizeof(mask));
 		v4tov6(dhcp.client, bp->yiaddr);
 		if(!optgetaddr(bp, ODserverid, dhcp.server)) {
-			fprint(2, "dhcprecv: Offer from server with invalid serverid\n");
+			fprintf(stderr, "dhcprecv: Offer from server with invalid serverid\n");
 			break;
 		}
 
@@ -373,23 +381,23 @@ openlisten(char *net)
 	char data[128], devdir[40];
 
 //	sprint(data, "%s/udp!*!bootpc", net);
-	sprint(data, "%s/udp!*!68", net);
+	snprintf(data, sizeof(data), "%s/udp!*!68", net);
 	for(n = 0; ; n++) {
-		cfd = announce(data, devdir);
+		cfd = announce9(data, devdir, 0);
 		if(cfd >= 0)
 			break;
 		/* might be another client - wait and try again */
-		fprint(2, "dhcpclient: can't announce %s: %r", data);
+		fprintf(stderr, "dhcpclient: can't announce %s: %r", data);
 		sleep(1000);
 		if(n > 10)
 			myfatal("can't announce: giving up: %r");
 	}
 
-	if(fprint(cfd, "headers") < 0)
+	if(write(cfd, "headers", strlen("headers")) < 0)
 		myfatal("can't set header mode: %r");
 
-	sprint(data, "%s/data", devdir);
-	fd = open(data, ORDWR);
+	snprintf(data, sizeof(data), "%s/data", devdir);
+	fd = open(data, O_RDWR);
 	if(fd < 0)
 		myfatal("open %s: %r", data);
 	close(cfd);
@@ -500,18 +508,18 @@ parse(uint8_t *p, int n)
 
 	bp = (Bootp*)p;
 	if(n < bp->optmagic - p) {
-		fprint(2, "dhcpclient: parse: short bootp packet");
+		fprintf(stderr, "dhcpclient: parse: short bootp packet");
 		return 0;
 	}
 
 	if(dhcp.xid != nhgetl(bp->xid)) {
-		fprint(2, "dhcpclient: parse: bad xid: got %ux expected %lux\n",
+		fprintf(stderr, "dhcpclient: parse: bad xid: got %ux expected %lux\n",
 			nhgetl(bp->xid), dhcp.xid);
 		return 0;
 	}
 
 	if(bp->op != Bootreply) {
-		fprint(2, "dhcpclient: parse: bad op\n");
+		fprintf(stderr, "dhcpclient: parse: bad op\n");
 		return 0;
 	}
 
@@ -519,11 +527,11 @@ parse(uint8_t *p, int n)
 	p = bp->optmagic;
 
 	if(n < 4) {
-		fprint(2, "dhcpclient: parse: not option data");
+		fprintf(stderr, "dhcpclient: parse: not option data");
 		return 0;
 	}
 	if(memcmp(optmagic, p, 4) != 0) {
-		fprint(2, "dhcpclient: parse: bad opt magic %ux %ux %ux %ux\n",
+		fprintf(stderr, "dhcpclient: parse: bad opt magic %ux %ux %ux %ux\n",
 			p[0], p[1], p[2], p[3]);
 		return 0;
 	}
@@ -537,13 +545,13 @@ parse(uint8_t *p, int n)
 		if(code == OBend)
 			return bp;
 		if(n == 0) {
-			fprint(2, "dhcpclient: parse: bad option: %d", code);
+			fprintf(stderr, "dhcpclient: parse: bad option: %d", code);
 			return 0;
 		}
 		len = *p++;
 		n--;
 		if(len > n) {
-			fprint(2, "dhcpclient: parse: bad option: %d", code);
+			fprintf(stderr, "dhcpclient: parse: bad option: %d", code);
 			return 0;
 		}
 		p += len;
@@ -568,24 +576,24 @@ bootpdump(uint8_t *p, int n)
 	up = (Udphdr*)bp->udphdr;
 
 	if(n < bp->optmagic - p) {
-		fprint(2, "dhcpclient: short bootp packet");
+		fprintf(stderr, "dhcpclient: short bootp packet");
 		return;
 	}
 
-	fprint(2, "laddr=%I lport=%d raddr=%I rport=%d\n", up->laddr,
+	fprintf(stderr, "laddr=%I lport=%d raddr=%I rport=%d\n", up->laddr,
 		nhgets(up->lport), up->raddr, nhgets(up->rport));
-	fprint(2, "op=%d htype=%d hlen=%d hops=%d\n", bp->op, bp->htype,
+	fprintf(stderr, "op=%d htype=%d hlen=%d hops=%d\n", bp->op, bp->htype,
 		bp->hlen, bp->hops);
-	fprint(2, "xid=%ux secs=%d flags=%ux\n", nhgetl(bp->xid),
+	fprintf(stderr, "xid=%ux secs=%d flags=%ux\n", nhgetl(bp->xid),
 		nhgets(bp->secs), nhgets(bp->flags));
-	fprint(2, "ciaddr=%V yiaddr=%V siaddr=%V giaddr=%V\n",
+	fprintf(stderr, "ciaddr=%V yiaddr=%V siaddr=%V giaddr=%V\n",
 		bp->ciaddr, bp->yiaddr, bp->siaddr, bp->giaddr);
-	fprint(2, "chaddr=");
+	fprintf(stderr, "chaddr=");
 	for(i=0; i<16; i++)
-		fprint(2, "%ux ", bp->chaddr[i]);
-	fprint(2, "\n");
-	fprint(2, "sname=%s\n", bp->sname);
-	fprint(2, "file = %s\n", bp->file);
+		fprintf(stderr, "%ux ", bp->chaddr[i]);
+	fprintf(stderr, "\n");
+	fprintf(stderr, "sname=%s\n", bp->sname);
+	fprintf(stderr, "file = %s\n", bp->file);
 
 	n -= bp->optmagic - p;
 	p = bp->optmagic;
@@ -593,7 +601,7 @@ bootpdump(uint8_t *p, int n)
 	if(n < 4)
 		return;
 	if(memcmp(optmagic, p, 4) != 0)
-		fprint(2, "dhcpclient: bad opt magic %ux %ux %ux %ux\n",
+		fprintf(stderr, "dhcpclient: bad opt magic %ux %ux %ux %ux\n",
 			p[0], p[1], p[2], p[3]);
 	p += 4;
 	n -= 4;
@@ -606,40 +614,40 @@ bootpdump(uint8_t *p, int n)
 		if(code == OBend)
 			break;
 		if(n == 0) {
-			fprint(2, " bad option: %d", code);
+			fprintf(stderr, " bad option: %d", code);
 			return;
 		}
 		len = *p++;
 		n--;
 		if(len > n) {
-			fprint(2, " bad option: %d", code);
+			fprintf(stderr, " bad option: %d", code);
 			return;
 		}
 		switch(code) {
 		default:
-			fprint(2, "unknown option %d\n", code);
+			fprintf(stderr, "unknown option %d\n", code);
 			for(i = 0; i<len; i++)
-				fprint(2, "%ux ", p[i]);
+				fprintf(stderr, "%ux ", p[i]);
 		case ODtype:
-			fprint(2, "DHCP type %d\n", p[0]);
+			fprintf(stderr, "DHCP type %d\n", p[0]);
 			break;
 		case ODclientid:
-			fprint(2, "client id=");
+			fprintf(stderr, "client id=");
 			for(i = 0; i<len; i++)
-				fprint(2, "%ux ", p[i]);
-			fprint(2, "\n");
+				fprintf(stderr, "%ux ", p[i]);
+			fprintf(stderr, "\n");
 			break;
 		case ODlease:
-			fprint(2, "lease=%d\n", nhgetl(p));
+			fprintf(stderr, "lease=%d\n", nhgetl(p));
 			break;
 		case ODserverid:
-			fprint(2, "server id=%V\n", p);
+			fprintf(stderr, "server id=%V\n", p);
 			break;
 		case OBmask:
-			fprint(2, "mask=%V\n", p);
+			fprintf(stderr, "mask=%V\n", p);
 			break;
 		case OBrouter:
-			fprint(2, "router=%V\n", p);
+			fprintf(stderr, "router=%V\n", p);
 			break;
 		}
 		p += len;
@@ -647,27 +655,26 @@ bootpdump(uint8_t *p, int n)
 	}
 }
 
+void
+myfatal(char *fmt, ...)
+{
+	va_list arg;
+	fprintf(stderr, "%s: ", argv0);
+	va_start(arg, fmt);
+	vfprintf(stderr, fmt, arg);
+	va_end(arg);
+	killpg(0, SIGTERM);
+	exit(1);
+}
+
 uint32_t
-thread(void(*f)(void*), void *a)
+thread(void*(*f)(void*), void *a)
 {
 	int pid;
 	pthread_t whocares;
 
-	if (pthread_create(&whocares, NULL, a, job)) {
-		error(1, 0, "%s: %r","Failed to create job");
+	if (pthread_create(&whocares, NULL, f, a)) {
+		myfatal("%s: %r","Failed to create job");
 	}
 }
 
-void
-myfatal(char *fmt, ...)
-{
-	char buf[1024];
-	va_list arg;
-
-	va_start(arg, fmt);
-	vseprint(buf, buf+sizeof(buf), fmt, arg);
-	va_end(arg);
-	fprint(2, "%s: %s\n", argv0, buf);
-	postnote(PNGROUP, getpid(), "die");
-	exits(buf);
-}

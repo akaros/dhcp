@@ -150,6 +150,16 @@ enum {
 	Srebinding,
 };
 
+typedef struct Udphdr Udphdr;
+struct Udphdr
+{
+	uint8_t	raddr[IPaddrlen];	/* V6 remote address */
+	uint8_t	laddr[IPaddrlen];	/* V6 local address */
+	uint8_t	ifcaddr[IPaddrlen];	/* V6 ifc addr msg was received on */
+	uint8_t	rport[2];		/* remote port */
+	uint8_t	lport[2];		/* local port */
+};
+
 typedef struct Bootp	Bootp;
 struct Bootp
 {
