@@ -2,7 +2,7 @@
 
 ### Build flags for all targets
 #
-CFLAGS          = -O2 -std=gnu99 -fno-stack-protector -fgnu89-inline -Wsystem-headers -fPIC -static -fno-omit-frame-pointer -g -Iinclude -I $(AKAROS)/include
+CFLAGS          = -O2 -std=gnu99 -fno-stack-protector -fgnu89-inline -Wsystem-headers -fPIC -static -fno-omit-frame-pointer -g -Iinclude 
 LDFLAGS          =
 LDLIBS         = -lpthread -lbenchutil -lm -liplib -lndblib
 DEST	= $(AKAROS)/kern/kfs/bin
